@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal
+from textual.containers import Horizontal
 from textual.message import Message
-from textual.widgets import Footer, Input, Label, ListItem, ListView, Markdown, Static
+from textual.widgets import Footer, Input, Label, ListItem, ListView, Markdown
 
 from ..models import SearchResult
-from ..service import search
+from ..service import search_with_note
 
 
 class DocSelected(Message):
@@ -78,7 +78,7 @@ class DocScrollsApp(App[None]):
         self.query_one("#search", Input).focus()
 
     def _refresh_results(self, query: str) -> None:
-        self.results = search(self.source, query=query, version=self.version, limit=75)
+        self.results, note = search_with_note(self.source, query=query, version=self.version, limit=75)
         list_view = self.query_one("#results", ListView)
         list_view.clear()
 
@@ -91,7 +91,10 @@ class DocScrollsApp(App[None]):
             list_view.index = 0
             self._render_current()
         else:
-            self.query_one("#doc", Markdown).update("# No results\nTry a different query.")
+            if note:
+                self.query_one("#doc", Markdown).update(f"# Search Syntax Error\n{note}")
+            else:
+                self.query_one("#doc", Markdown).update("# No results\nTry a different query.")
 
     def _render_current(self) -> None:
         if not self.results:

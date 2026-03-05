@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import shutil
-from pathlib import Path
 
 from .adapters.python_adapter import PythonDocsAdapter
 from .indexer import collect_html_pages, index_pages, init_db, parse_html_page, reset_index
 from .models import InstalledDocset, SearchResult
-from .search import query_db
+from .search import query_db_with_note
 from .storage import docset_db_path, docset_root, ensure_dirs, load_installed, upsert_installed
+
+
+def _version_sort_key(version: str) -> tuple[int, tuple[int, ...], str]:
+    parts = version.split(".")
+    if parts and all(part.isdigit() for part in parts):
+        return (1, tuple(int(part) for part in parts), "")
+    return (0, tuple(), version)
 
 
 def install_python_docs(version: str | None = None) -> InstalledDocset:
@@ -75,9 +81,16 @@ def get_installed(source: str, version: str | None = None) -> InstalledDocset:
                 return item
         raise RuntimeError(f"Source '{source}' version '{version}' is not installed")
 
-    return sorted(items, key=lambda x: x.version)[-1]
+    return sorted(items, key=lambda x: _version_sort_key(x.version))[-1]
 
 
 def search(source: str, query: str, version: str | None = None, limit: int = 50) -> list[SearchResult]:
+    rows, _ = search_with_note(source=source, query=query, version=version, limit=limit)
+    return rows
+
+
+def search_with_note(
+    source: str, query: str, version: str | None = None, limit: int = 50
+) -> tuple[list[SearchResult], str | None]:
     installed = get_installed(source=source, version=version)
-    return query_db(installed.db_path, query=query, limit=limit)
+    return query_db_with_note(installed.db_path, query=query, limit=limit)

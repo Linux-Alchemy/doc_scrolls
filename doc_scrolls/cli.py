@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import typer
 
-from .service import get_installed, install_python_docs, list_installed, search
+from .service import get_installed, install_python_docs, list_installed, search_with_note
 from .ui.app import DocScrollsApp
 
 app = typer.Typer(help="doc_scrolls: terminal-first docs browser")
@@ -30,15 +30,18 @@ def list_cmd() -> None:
         typer.echo(f"{item.source}@{item.version} pages={item.page_count} db={item.db_path}")
 
 
-@app.command()
-def search_cmd(
+@app.command("search")
+def search(
     query: str = typer.Argument(..., help="FTS query string"),
     source: str = typer.Option("python", "--source"),
     version: str | None = typer.Option(None, "--version"),
     limit: int = typer.Option(15, "--limit"),
 ) -> None:
     """Search installed docs and print top matches."""
-    rows = search(source=source, version=version, query=query, limit=limit)
+    rows, note = search_with_note(source=source, version=version, query=query, limit=limit)
+    if note:
+        typer.secho(note, fg=typer.colors.YELLOW)
+
     if not rows:
         typer.echo("No matches")
         return

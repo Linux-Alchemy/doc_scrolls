@@ -4,7 +4,7 @@ import shutil
 import tarfile
 import tempfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import urljoin
 
 import httpx
@@ -71,8 +71,23 @@ class PythonDocsAdapter:
 
     def _safe_extract(self, tar: tarfile.TarFile, destination: Path) -> None:
         dest_abs = destination.resolve()
+        safe_members: list[tarfile.TarInfo] = []
         for member in tar.getmembers():
-            member_abs = (destination / member.name).resolve()
-            if not str(member_abs).startswith(str(dest_abs)):
+            normalized_name = member.name.replace("\\", "/")
+            member_path = PurePosixPath(normalized_name)
+            if member_path.is_absolute() or ".." in member_path.parts:
                 raise RuntimeError("Archive contains unsafe path traversal entries")
-        tar.extractall(destination)
+
+            candidate = (dest_abs / Path(*member_path.parts)).resolve()
+            try:
+                candidate.relative_to(dest_abs)
+            except ValueError as exc:
+                raise RuntimeError("Archive contains unsafe path traversal entries") from exc
+
+            if member.issym() or member.islnk() or member.isdev() or member.isfifo():
+                raise RuntimeError("Archive contains unsafe member types")
+
+            if member.isfile() or member.isdir():
+                safe_members.append(member)
+
+        tar.extractall(destination, members=safe_members)
