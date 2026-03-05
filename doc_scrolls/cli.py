@@ -14,7 +14,15 @@ def install(source: str = typer.Argument("python"), version: str | None = typer.
     if source != "python":
         raise typer.BadParameter("V1 supports only source='python'")
 
-    docset = install_python_docs(version=version)
+    def progress(message: str) -> None:
+        typer.echo(f"[install] {message}")
+
+    try:
+        docset = install_python_docs(version=version, progress=progress)
+    except Exception as exc:
+        typer.secho(f"Install failed: {exc}", fg=typer.colors.RED)
+        raise typer.Exit(code=1) from exc
+
     typer.echo(f"Installed {docset.source}@{docset.version} with {docset.page_count} indexed pages")
 
 
@@ -38,7 +46,12 @@ def search(
     limit: int = typer.Option(15, "--limit"),
 ) -> None:
     """Search installed docs and print top matches."""
-    rows, note = search_with_note(source=source, version=version, query=query, limit=limit)
+    try:
+        rows, note = search_with_note(source=source, version=version, query=query, limit=limit)
+    except RuntimeError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(code=1) from exc
+
     if note:
         typer.secho(note, fg=typer.colors.YELLOW)
 
@@ -56,7 +69,12 @@ def open(
     version: str | None = typer.Option(None, "--version"),
 ) -> None:
     """Open TUI browser."""
-    _ = get_installed(source=source, version=version)
+    try:
+        _ = get_installed(source=source, version=version)
+    except RuntimeError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(code=1) from exc
+
     app_ui = DocScrollsApp(source=source, version=version)
     app_ui.run()
 

@@ -15,7 +15,7 @@ def test_install_python_docs_indexes_pages(tmp_path: Path, monkeypatch) -> None:
     installed_rows = []
     monkeypatch.setattr(service, "upsert_installed", lambda item: installed_rows.append(item))
 
-    def fake_install(self, destination: Path, version: str | None = None):
+    def fake_install(self, destination: Path, version: str | None = None, progress=None):
         destination.mkdir(parents=True, exist_ok=True)
         page = destination / "index.html"
         page.write_text(
