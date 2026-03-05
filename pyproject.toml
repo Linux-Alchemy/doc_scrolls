@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "doc-scrolls"
+version = "0.1.0"
+description = "Terminal-first Python documentation browser with offline search"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "typer>=0.12.0",
+  "httpx>=0.27.0",
+  "beautifulsoup4>=4.12.0",
+  "markdownify>=0.12.0",
+  "textual>=0.63.0",
+  "rich>=13.7.0",
+]
+
+[project.scripts]
+doc-scrolls = "doc_scrolls.cli:app"
+
+[tool.setuptools]
+packages = ["doc_scrolls", "doc_scrolls.adapters", "doc_scrolls.ui"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+addopts = "-q"
