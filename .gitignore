@@ -4,3 +4,6 @@ BOOKMARK.md
 __pycache__/
 .ruff_cache/
 .pytest_cache/
+.tmp-home/
+.tmp-sqlite/
+.uv-cache/
