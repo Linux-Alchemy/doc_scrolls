@@ -1,20 +1,32 @@
 from __future__ import annotations
 
+import re
+import sqlite3
+
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal
+from textual.containers import Horizontal, Vertical
 from textual.events import Key
 from textual.widgets import Footer, Input, Label, ListItem, ListView, Markdown
+from textual.widgets._markdown import MarkdownHeader
 
 from ..models import SearchResult
 from ..service import search_with_note
 
 
-# -- Custom widgets that delegate nav keys to the app -----------------------
+def _slugify(text: str) -> str:
+    """Turn heading text into an anchor slug matching Python docs conventions."""
+    slug = text.lower().strip()
+    slug = re.sub(r"[^\w\s-]", "", slug)
+    slug = re.sub(r"[\s]+", "-", slug)
+    return slug
+
+
+# -- Custom widgets ----------------------------------------------------------
 
 
 class ResultsList(ListView):
-    """ListView that yields vim keys to the app instead of handling them."""
+    """ListView with vim-style keys."""
 
     BINDINGS = [
         Binding("j", "cursor_down", show=False),
@@ -42,7 +54,7 @@ class ResultsList(ListView):
 
 
 class DocViewer(Markdown):
-    """Markdown viewer with vim-style scroll keys."""
+    """Markdown viewer with vim scroll and section jumping."""
 
     can_focus = True
     DEFAULT_CSS = """
@@ -59,6 +71,7 @@ class DocViewer(Markdown):
         Binding("h", "focus_results", show=False),
         Binding("g", "scroll_home", show=False),
         Binding("G", "scroll_end", show=False),
+        Binding("t", "show_toc", show=False),
         Binding("q", "quit", show=False),
         Binding("slash", "focus_search", show=False),
     ]
@@ -68,6 +81,40 @@ class DocViewer(Markdown):
 
     def action_focus_search(self) -> None:
         self.app.query_one("#search", Input).focus()
+
+    def action_show_toc(self) -> None:
+        self.app.action_show_toc()
+
+    def scroll_to_anchor(self, anchor: str) -> bool:
+        """Find a heading matching the anchor slug and scroll to it."""
+        headers = list(self.query(MarkdownHeader))
+        for header in headers:
+            heading_text = str(header._content).strip()
+            if _slugify(heading_text) == anchor.lstrip("#"):
+                header.scroll_visible(top=True, animate=False)
+                return True
+        # Fuzzy fallback: check if anchor is contained in slug
+        for header in headers:
+            heading_text = str(header._content).strip()
+            if anchor.lstrip("#") in _slugify(heading_text):
+                header.scroll_visible(top=True, animate=False)
+                return True
+        return False
+
+
+class TocList(ListView):
+    """Table of contents popup list with vim keys."""
+
+    BINDINGS = [
+        Binding("j", "cursor_down", show=False),
+        Binding("k", "cursor_up", show=False),
+        Binding("escape", "dismiss_toc", show=False),
+        Binding("t", "dismiss_toc", show=False),
+        Binding("q", "quit", show=False),
+    ]
+
+    def action_dismiss_toc(self) -> None:
+        self.app.action_dismiss_toc()
 
 
 # -- Main app ---------------------------------------------------------------
@@ -92,6 +139,10 @@ class DocScrollsApp(App[None]):
       border: solid $accent;
     }
 
+    #doc-container {
+      width: 1fr;
+    }
+
     #doc {
       border: solid $surface;
       padding: 0 1;
@@ -101,6 +152,17 @@ class DocScrollsApp(App[None]):
 
     #doc:focus-within, #doc:focus {
       border: solid $accent;
+    }
+
+    #toc-panel {
+      display: none;
+      height: 1fr;
+      border: solid $warning;
+      width: 100%;
+    }
+
+    #toc-panel.visible {
+      display: block;
     }
 
     #search {
@@ -121,12 +183,15 @@ class DocScrollsApp(App[None]):
         self.version = version
         self.results: list[SearchResult] = []
         self.current_index = 0
+        self._toc_headings: list[tuple[str, str]] = []  # (text, anchor)
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="main"):
             yield ResultsList(id="results")
-            yield DocViewer("# doc_scrolls\nInstall docs and start searching.", id="doc")
-        yield Input(placeholder="Search docs… (Esc to navigate, / to search, q to quit)", id="search")
+            with Vertical(id="doc-container"):
+                yield DocViewer("# doc_scrolls\nInstall docs and start searching.", id="doc")
+                yield TocList(id="toc-panel")
+        yield Input(placeholder="Search docs… (Esc to navigate, / to search, t for ToC, q to quit)", id="search")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -167,6 +232,21 @@ class DocScrollsApp(App[None]):
             return
         current = self.results[self.current_index]
         self.query_one("#doc", DocViewer).update(current.markdown)
+        self._build_toc(current.markdown)
+
+    def _build_toc(self, markdown: str) -> None:
+        """Extract headings from markdown text for the ToC panel."""
+        self._toc_headings = []
+        for line in markdown.split("\n"):
+            match = re.match(r"^(#{1,4})\s+(.+)", line)
+            if match:
+                level = len(match.group(1))
+                text = match.group(2).strip()
+                # Strip markdown link syntax: [text](url) -> text
+                text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
+                anchor = _slugify(text)
+                indent = "  " * (level - 1)
+                self._toc_headings.append((f"{indent}{text}", anchor))
 
     def _select_index(self, index: int) -> None:
         if not self.results:
@@ -175,6 +255,24 @@ class DocScrollsApp(App[None]):
         self.query_one("#results", ResultsList).index = self.current_index
         self._render_current()
 
+    # -- ToC overlay ---------------------------------------------------------
+
+    def action_show_toc(self) -> None:
+        toc_panel = self.query_one("#toc-panel", TocList)
+        toc_panel.clear()
+        if not self._toc_headings:
+            return
+        for text, _anchor in self._toc_headings:
+            toc_panel.append(ListItem(Label(text)))
+        toc_panel.add_class("visible")
+        toc_panel.index = 0
+        toc_panel.focus()
+
+    def action_dismiss_toc(self) -> None:
+        toc_panel = self.query_one("#toc-panel", TocList)
+        toc_panel.remove_class("visible")
+        self.query_one("#doc", DocViewer).focus()
+
     # -- event handlers ------------------------------------------------------
 
     def on_input_changed(self, event: Input.Changed) -> None:
@@ -182,7 +280,7 @@ class DocScrollsApp(App[None]):
             self._refresh_results(event.value)
 
     def on_key(self, event: Key) -> None:
-        """Handle keys that need app-level awareness (search bar escape)."""
+        """Handle keys that need app-level awareness."""
         focused = self.focused
         is_search = isinstance(focused, Input) and focused.id == "search"
 
@@ -195,9 +293,78 @@ class DocScrollsApp(App[None]):
             self.current_index = event.list_view.index
             self._render_current()
 
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        """Handle Enter on a ToC item — jump to that heading."""
+        if event.list_view.id == "toc-panel" and event.list_view.index is not None:
+            idx = event.list_view.index
+            if 0 <= idx < len(self._toc_headings):
+                _text, anchor = self._toc_headings[idx]
+                doc = self.query_one("#doc", DocViewer)
+                doc.scroll_to_anchor(anchor)
+                self.action_dismiss_toc()
+
     def on_markdown_link_clicked(self, event: Markdown.LinkClicked) -> None:
-        """Suppress default link-opening behavior."""
+        """Handle link clicks: anchor jumps or cross-page navigation."""
         event.prevent_default()
+        href = event.href
+
+        # Anchor link — scroll to heading
+        if href.startswith("#"):
+            anchor = href.lstrip("#")
+            if anchor:
+                self.query_one("#doc", DocViewer).scroll_to_anchor(anchor)
+            return
+
+        # Internal page link — try to load from index
+        self._try_load_page(href)
+
+    def _try_load_page(self, href: str) -> None:
+        """Attempt to load an internal docs page by matching its URL."""
+        if not self.results:
+            return
+        current = self.results[self.current_index]
+        # Resolve relative href against current page URL
+        base = current.url.rsplit("/", 1)[0] + "/"
+        if href.startswith("http"):
+            target = href
+        else:
+            from urllib.parse import urljoin
+            target = urljoin(base, href)
+
+        # Strip fragment
+        target_base = target.split("#")[0]
+        fragment = target.split("#")[1] if "#" in target else None
+
+        # Look up in search results first, then fall back to DB
+        for result in self.results:
+            if result.url.split("#")[0] == target_base:
+                self.query_one("#doc", DocViewer).update(result.markdown)
+                self._build_toc(result.markdown)
+                if fragment:
+                    self.query_one("#doc", DocViewer).scroll_to_anchor(fragment)
+                return
+
+        # Try DB lookup
+        from ..service import get_installed
+        try:
+            installed = get_installed(source=self.source, version=self.version)
+        except RuntimeError:
+            return
+        try:
+            with sqlite3.connect(installed.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    "SELECT id, title, url, markdown, plain_text FROM pages WHERE url = ? LIMIT 1",
+                    (target_base,),
+                ).fetchone()
+                if row:
+                    md = row["markdown"]
+                    self.query_one("#doc", DocViewer).update(md)
+                    self._build_toc(md)
+                    if fragment:
+                        self.query_one("#doc", DocViewer).scroll_to_anchor(fragment)
+        except sqlite3.Error:
+            pass
 
     # -- actions (global) ----------------------------------------------------
 
