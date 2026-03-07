@@ -7,8 +7,8 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.events import Key
-from textual.widgets import Footer, Input, Label, ListItem, ListView, Markdown
-from textual.widgets._markdown import MarkdownHeader
+from textual.widgets import Footer, Input, Label, ListItem, ListView, Markdown, Static
+from textual.widgets._markdown import MarkdownBlock, MarkdownHeader
 
 from ..models import SearchResult
 from ..service import search_with_note
@@ -72,6 +72,9 @@ class DocViewer(Markdown):
         Binding("g", "scroll_home", show=False),
         Binding("G", "scroll_end", show=False),
         Binding("t", "show_toc", show=False),
+        Binding("ctrl+f", "open_find", show=False),
+        Binding("n", "find_next", show=False),
+        Binding("N", "find_prev", show=False),
         Binding("q", "quit", show=False),
         Binding("slash", "focus_search", show=False),
     ]
@@ -84,6 +87,27 @@ class DocViewer(Markdown):
 
     def action_show_toc(self) -> None:
         self.app.action_show_toc()
+
+    def action_open_find(self) -> None:
+        self.app.action_open_find()
+
+    def action_find_next(self) -> None:
+        self.app.action_find_next()
+
+    def action_find_prev(self) -> None:
+        self.app.action_find_prev()
+
+    def find_matches(self, needle: str) -> list[MarkdownBlock]:
+        """Return all MarkdownBlock children whose text contains needle."""
+        if not needle:
+            return []
+        needle_lower = needle.lower()
+        matches = []
+        for block in self.query(MarkdownBlock):
+            text = str(block._content).strip()
+            if text and needle_lower in text.lower():
+                matches.append(block)
+        return matches
 
     def scroll_to_anchor(self, anchor: str) -> bool:
         """Find a heading matching the anchor slug and scroll to it."""
@@ -100,6 +124,38 @@ class DocViewer(Markdown):
                 header.scroll_visible(top=True, animate=False)
                 return True
         return False
+
+
+class FindBar(Horizontal):
+    """Ctrl+F find bar for in-page search."""
+
+    DEFAULT_CSS = """
+    FindBar {
+        display: none;
+        height: 3;
+        border-top: solid $warning;
+        padding: 0 1;
+    }
+
+    FindBar.visible {
+        display: block;
+    }
+
+    FindBar #find-input {
+        width: 1fr;
+    }
+
+    FindBar #find-status {
+        width: auto;
+        min-width: 16;
+        padding: 0 1;
+        content-align: right middle;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Input(placeholder="Find in page… (Enter/n next, Shift+Enter/N prev, Esc close)", id="find-input")
+        yield Static("", id="find-status")
 
 
 class TocList(ListView):
@@ -170,6 +226,14 @@ class DocScrollsApp(App[None]):
       height: 3;
       border-top: solid $primary;
     }
+
+    .find-match {
+      background: $warning 30%;
+    }
+
+    .find-current {
+      background: $warning 70%;
+    }
     """
 
     BINDINGS = [
@@ -184,6 +248,8 @@ class DocScrollsApp(App[None]):
         self.results: list[SearchResult] = []
         self.current_index = 0
         self._toc_headings: list[tuple[str, str]] = []  # (text, anchor)
+        self._find_matches: list[MarkdownBlock] = []
+        self._find_index: int = -1
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="main"):
@@ -191,7 +257,8 @@ class DocScrollsApp(App[None]):
             with Vertical(id="doc-container"):
                 yield DocViewer("# doc_scrolls\nInstall docs and start searching.", id="doc")
                 yield TocList(id="toc-panel")
-        yield Input(placeholder="Search docs… (Esc to navigate, / to search, t for ToC, q to quit)", id="search")
+                yield FindBar(id="find-bar")
+        yield Input(placeholder="Search docs… (Esc to navigate, / to search, t for ToC, Ctrl+F find)", id="search")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -231,6 +298,8 @@ class DocScrollsApp(App[None]):
         if not self.results:
             return
         current = self.results[self.current_index]
+        self._find_matches = []
+        self._find_index = -1
         self.query_one("#doc", DocViewer).update(current.markdown)
         self._build_toc(current.markdown)
 
@@ -278,15 +347,28 @@ class DocScrollsApp(App[None]):
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "search":
             self._refresh_results(event.value)
+        elif event.input.id == "find-input":
+            self._run_find(event.value)
 
     def on_key(self, event: Key) -> None:
         """Handle keys that need app-level awareness."""
         focused = self.focused
         is_search = isinstance(focused, Input) and focused.id == "search"
+        is_find = isinstance(focused, Input) and focused.id == "find-input"
 
         if is_search and event.key in ("enter", "escape"):
             event.prevent_default()
             self._focus_results()
+        elif is_find:
+            if event.key == "escape":
+                event.prevent_default()
+                self.action_close_find()
+            elif event.key == "enter":
+                event.prevent_default()
+                self.action_find_next()
+            elif event.key == "shift+enter":
+                event.prevent_default()
+                self.action_find_prev()
 
     def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
         if event.list_view.id == "results" and event.list_view.index is not None:
@@ -365,6 +447,71 @@ class DocScrollsApp(App[None]):
                         self.query_one("#doc", DocViewer).scroll_to_anchor(fragment)
         except sqlite3.Error:
             pass
+
+    # -- find in page --------------------------------------------------------
+
+    def action_open_find(self) -> None:
+        find_bar = self.query_one("#find-bar", FindBar)
+        find_bar.add_class("visible")
+        find_input = self.query_one("#find-input", Input)
+        find_input.value = ""
+        find_input.focus()
+        self._find_matches = []
+        self._find_index = -1
+        self._update_find_status()
+
+    def action_close_find(self) -> None:
+        self.query_one("#find-bar", FindBar).remove_class("visible")
+        # Keep matches alive so n/N in doc pane can continue jumping
+        self.query_one("#doc", DocViewer).focus()
+
+    def _run_find(self, needle: str) -> None:
+        self._clear_find_highlights()
+        doc = self.query_one("#doc", DocViewer)
+        self._find_matches = doc.find_matches(needle)
+        if self._find_matches:
+            self._find_index = 0
+            self._apply_find_highlights()
+            self._find_matches[0].scroll_visible(top=True, animate=False)
+        else:
+            self._find_index = -1
+        self._update_find_status()
+
+    def action_find_next(self) -> None:
+        if not self._find_matches:
+            return
+        self._find_index = (self._find_index + 1) % len(self._find_matches)
+        self._apply_find_highlights()
+        self._find_matches[self._find_index].scroll_visible(top=True, animate=False)
+        self._update_find_status()
+
+    def action_find_prev(self) -> None:
+        if not self._find_matches:
+            return
+        self._find_index = (self._find_index - 1) % len(self._find_matches)
+        self._apply_find_highlights()
+        self._find_matches[self._find_index].scroll_visible(top=True, animate=False)
+        self._update_find_status()
+
+    def _apply_find_highlights(self) -> None:
+        self._clear_find_highlights()
+        for i, block in enumerate(self._find_matches):
+            block.add_class("find-match")
+            if i == self._find_index:
+                block.add_class("find-current")
+
+    def _clear_find_highlights(self) -> None:
+        doc = self.query_one("#doc", DocViewer)
+        for block in doc.query(".find-match"):
+            block.remove_class("find-match")
+            block.remove_class("find-current")
+
+    def _update_find_status(self) -> None:
+        status = self.query_one("#find-status", Static)
+        if not self._find_matches:
+            status.update("No matches" if self._find_index == -1 and self.query_one("#find-input", Input).value else "")
+        else:
+            status.update(f"{self._find_index + 1}/{len(self._find_matches)}")
 
     # -- actions (global) ----------------------------------------------------
 
